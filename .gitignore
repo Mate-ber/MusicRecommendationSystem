@@ -1,5 +1,30 @@
-.venv/
-.idea/
+# Python
 __pycache__/
-*.pyc
-*.csv
+*.py[cod]
+*.so
+
+# Virtual Environment
+.venv/
+
+# IDE
+.idea/
+.vscode/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Data
+data/raw/*
+data/processed/*
+data/models/*
+
+# Keep folders
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!data/models/.gitkeep
+
+# Logs
+*.log
+
+# macOS
+.DS_Store
