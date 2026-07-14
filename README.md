@@ -1,7 +1,8 @@
 # Music Recommendation System
 
-Music recommendations from implicit listening data, using ALS with **explicit positive and
-negative feedback** rather than the usual positives-only formulation.
+Music recommendations from implicit listening data. The project set out to test whether ALS with
+**explicit negative feedback** beats the usual positives-only formulation. On the evaluation used
+here it does not — see [Results](#results) — and the shipped model is positives-only.
 
 ## Data
 
@@ -43,13 +44,17 @@ Playcount is turned into a signed confidence. `implicit` reads a positive value 
 `abs(value)`", which is what makes explicit negatives possible:
 
 ```
-playcount >= 2  ->  +(1 + alpha * log1p(playcount))   positive
-playcount == 1  ->  -beta                             explicit negative
+playcount >= threshold  ->  +(1 + alpha * log1p(playcount))   positive
+playcount <  threshold  ->  -beta                             explicit negative
 ```
 
 The intuition for the negative: the user was exposed to the track and did not come back.
 This matters because **playcount=1 is 61% of all rows**, so how it is treated largely defines
-the model. The split is 3,377,421 positives against 5,299,062 negatives.
+the model. At `threshold=1` nothing is negative and the formulation reduces to the standard
+positives-only one, which makes it a built-in control rather than a separate baseline.
+
+All three of `threshold`, `alpha` and `beta` are swept — `threshold` in {1, 2, 4}, `alpha` in
+{10, 20, 40, 80}, `beta` in {2, 5, 10, 20}.
 
 Two constraints worth knowing:
 
@@ -60,21 +65,95 @@ Two constraints worth knowing:
   which would scale the negatives along with the positives and undo the balance set in
   preprocessing. The tuning knobs live in `preprocess.confidence()` instead.
 
+## Evaluation setup
+
+20% of interactions are held out **before** any confidence transform is applied. This matters: an
+earlier version split the confidence matrix instead, holding out only entries that were positive
+*under the config being tested*. That gave each threshold a different test set — `threshold=4` was
+graded only on heavy-play tracks, which are far easier to predict — and made the scores
+incomparable across thresholds.
+
+Ground truth is therefore fixed and threshold-independent: **a held-out interaction is relevant if
+the user listened to the track at all**. Every config below is scored against that same test set —
+1,735,296 held-out interactions, covering the 466,061 of 534,735 users who received at least one
+(the rest have too few interactions for the 20% draw to land on any).
+
+The 36-config sweep runs on a deterministic 40% sample of users at 15 ALS iterations; the winner is
+then retrained on all users at 20 iterations. `factors=64`, `regularization=0.05` throughout.
+
+`beta` is omitted at `threshold=1`, where no interaction can be negative (minimum playcount is 1),
+so the 4x4x3 grid collapses from 48 configs to 36.
+
 ## Results
 
-Both models are evaluated against the same held-out positives (20% per user, 675,943 entries)
-and filtered against the same train matrix, so neither gets an unfair filtering advantage.
+**Negative feedback did not help. Every configuration that used it scored worse than every
+configuration that did not**, and the penalty grew monotonically with both the threshold and the
+weight `beta`.
 
-| metric | positives-only (baseline) | with negatives |
-|---|---|---|
-| precision@10 | **0.2221** | 0.2116 |
-| map@10 | **0.1192** | 0.1159 |
-| ndcg@10 | **0.1618** | 0.1564 |
-| auc | **0.6100** | 0.6057 |
+**threshold=1** — no negatives, so `beta` does not apply. ndcg@10 / map@10:
 
-**The negatives currently hurt.** Plain positives-only ALS wins on all four metrics, with
-precision@10 about 5% higher. At `beta=10` and `positive_threshold=2`, the negative signal costs
-accuracy rather than adding to it.
+| alpha | 10 | 20 | 40 | 80 |
+|---|---|---|---|---|
+| ndcg@10 | 0.1473 | 0.1512 | **0.1525** | 0.1503 |
+| map@10 | 0.0973 | 0.1000 | **0.1010** | 0.0998 |
+
+**threshold=2 and 4** — ndcg@10, best `alpha` per row shown in full below:
+
+| | beta=2 | beta=5 | beta=10 | beta=20 |
+|---|---|---|---|---|
+| threshold=2, alpha=80 | **0.1181** | 0.1151 | 0.1102 | 0.0993 |
+| threshold=2, alpha=40 | 0.1177 | 0.1149 | 0.1096 | 0.0983 |
+| threshold=2, alpha=20 | 0.1145 | 0.1121 | 0.1066 | 0.0958 |
+| threshold=2, alpha=10 | 0.1097 | 0.1072 | 0.1016 | 0.0917 |
+| threshold=4, alpha=40 | **0.0669** | 0.0628 | 0.0570 | 0.0466 |
+| threshold=4, alpha=80 | 0.0661 | 0.0617 | 0.0562 | 0.0465 |
+| threshold=4, alpha=20 | 0.0659 | 0.0630 | 0.0557 | 0.0459 |
+| threshold=4, alpha=10 | 0.0643 | 0.0615 | 0.0538 | 0.0449 |
+
+Three things fall out of this:
+
+- **The best negative-feedback config loses badly.** `threshold=2, alpha=80, beta=2` reaches 0.1181,
+  still **23% below** the worst positives-only config (0.1473) and 23% below the best (0.1525).
+  There is no overlap between the two groups at all.
+- **More negative weight is monotonically worse.** Raising `beta` from 2 to 20 costs ~16% of ndcg at
+  threshold=2 and ~30% at threshold=4, without a single exception across any alpha.
+- **`alpha` barely matters.** Across its whole 10-to-80 range it moves ndcg by a few percent, and it
+  peaks in the middle (40) rather than at either end — so the log1p confidence scaling is doing
+  something, but it is a second-order knob compared to how playcount=1 is treated.
+
+Final model, retrained on all users at `threshold=1, alpha=40`, 20 iterations:
+
+| metric | value |
+|---|---|
+| ndcg@10 | 0.1518 |
+| map@10 | 0.1003 |
+
+The small drop from the sweep's 0.1525 is expected — the sweep scored on 40% of users, and the full
+set includes the longer tail of sparse users.
+
+### Why there is no baseline comparison
+
+The winning config marks nothing negative, so "drop the negatives" is a no-op on it — a
+positives-only baseline is *the same model*. The run prints identical numbers for both for exactly
+this reason. The meaningful comparison is not that row but the sweep itself, where positives-only
+(threshold=1) beat every negative-feedback config outright.
+
+### Caveat: the evaluation favours threshold=1
+
+This result is **confounded with the choice of ground truth** and should not be read as "negative
+feedback is useless".
+
+Relevance is defined as *any* listen, and `playcount == 1` is 61% of all rows — so 61% of the test
+set consists of exactly the interactions that `threshold=2` and `threshold=4` are trained to push
+*down*. Those configs are being asked to rank highly the very items they were told to treat as
+negatives. Some of the gap is structural, not a genuine quality difference.
+
+What the sweep does establish is narrower but still useful: **if the goal is predicting whether a
+user will play a track at all, treating a single play as negative evidence is counterproductive.**
+Testing the original hypothesis properly requires an evaluation whose relevance definition is
+independent of the training threshold — e.g. holding out only `playcount >= 2` interactions as
+relevant, fixed across all configs. That is the obvious next experiment.
+
 
 ## Running
 
