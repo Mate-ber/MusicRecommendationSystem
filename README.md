@@ -121,15 +121,11 @@ Three things fall out of this:
   peaks in the middle (40) rather than at either end — so the log1p confidence scaling is doing
   something, but it is a second-order knob compared to how playcount=1 is treated.
 
-Final model, retrained on all users at `threshold=1, alpha=40`, 20 iterations:
+Retrained on all users at `threshold=1, alpha=40` (still `factors=64`): ndcg@10 = 0.1518,
+map@10 = 0.1003. The small drop from the sweep's 0.1525 is expected — the sweep scored on 40% of
+users, and the full set includes the longer tail of sparse users.
 
-| metric | value |
-|---|---|
-| ndcg@10 | 0.1518 |
-| map@10 | 0.1003 |
-
-The small drop from the sweep's 0.1525 is expected — the sweep scored on 40% of users, and the full
-set includes the longer tail of sparse users.
+`threshold=1, alpha=40` is held fixed from here on, and depth is tuned on top of it below.
 
 ### Why there is no baseline comparison
 
@@ -150,16 +146,67 @@ negatives. Some of the gap is structural, not a genuine quality difference.
 
 What the sweep does establish is narrower but still useful: **if the goal is predicting whether a
 user will play a track at all, treating a single play as negative evidence is counterproductive.**
-Testing the original hypothesis properly requires an evaluation whose relevance definition is
-independent of the training threshold — e.g. holding out only `playcount >= 2` interactions as
-relevant, fixed across all configs. That is the obvious next experiment.
 
+Testing the original hypothesis properly needs a relevance definition that does not move with the
+training threshold — e.g. holding out only `playcount >= 2` interactions as relevant, fixed across
+all configs. That is the obvious next experiment.
+
+## Embedding depth
+
+`factors` is the width of the user and track vectors — how many numbers the model gets to describe
+each one. Too few and unrelated tastes are forced onto the same axis; too many and the model starts
+fitting noise instead of signal. Everything else is pinned at the winning confidence config so depth
+is the only thing moving.
+
+```bash
+uv run python -m src.depth_sweep
+```
+
+Same protocol as above: the sweep runs on a 40% user sample at 15 iterations, then the winner is
+retrained on all users at 20 iterations. Scores are on the same held-out 20%, so a deeper model that
+were merely memorising would score *worse* here, not better.
+
+| factors | ndcg@10 | map@10 | precision@10 | auc | gain vs. previous |
+|---|---|---|---|---|---|
+| 16 | 0.0879 | 0.0544 | 0.1083 | 0.5593 | — |
+| 32 | 0.1172 | 0.0752 | 0.1416 | 0.5773 | +33% |
+| 64 | 0.1525 | 0.1010 | 0.1819 | 0.5980 | +30% |
+| 128 | 0.1887 | 0.1289 | 0.2242 | 0.6177 | +24% |
+| 256 | **0.2189** | 0.1536 | 0.2596 | 0.6323 | +16% |
+
+**Depth dominates every other knob in this project.** The whole 36-config confidence sweep moved
+ndcg between 0.145 and 0.152. Depth alone moved it from 0.088 to 0.219.
+
+**No overfitting knee was found.** Held-out accuracy was still climbing at 256 — the gains decay
+(33 → 30 → 24 → 16%) but never turn over. 256 is therefore a *stopping point chosen on cost*, not an
+optimum the data settled on. A deeper model may well score higher.
+
+Two caveats. `regularization` is fixed at 0.05 at every depth, and higher-capacity models normally
+want more of it — so 256 is plausibly a little under-regularised rather than genuinely optimal, and
+the depth curve is mildly confounded with it. And cost grows fast: a 256-factor fit is roughly 16x a
+64-factor one.
+
+### Final model
+
+`threshold=1, alpha=40, factors=256`, trained on all users, saved to `data/models/als.npz`:
+
+| metric | value |
+|---|---|
+| ndcg@10 | **0.2163** |
+| map@10 | 0.1508 |
+| precision@10 | 0.2575 |
+| auc | 0.6321 |
+
+A 42% improvement in ndcg@10 over the 64-factor model.
 
 ## Running
 
 ```bash
 uv sync
+
+uv run python -m src.data.explore
 uv run python -m src.main
+uv run python -m src.depth_sweep
 ```
 
 Or with Docker. `data/` is not baked into the image (see `.dockerignore`), so it is mounted at
@@ -169,6 +216,6 @@ run time:
 docker build -t music-rec .
 
 docker run --rm -v "$PWD/data:/app/data" music-rec
-
+docker run --rm -v "$PWD/data:/app/data" music-rec python -m src.depth_sweep
 docker run --rm -v "$PWD/data:/app/data" music-rec python -m src.data.explore
 ```
