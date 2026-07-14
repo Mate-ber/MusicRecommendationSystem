@@ -1,23 +1,18 @@
 import numpy as np
-from scipy.sparse import csr_matrix
 
 
-def split_positives(matrix, test_frac=0.2, random_state=42):
-    coo = matrix.tocoo()
-    mask = (coo.data > 0) & (
-        np.random.default_rng(random_state).random(coo.nnz) < test_frac
-    )
+def split_interactions(n_interactions, test_frac=0.2, random_state=42):
+    rng = np.random.default_rng(random_state)
+    return rng.random(n_interactions) < test_frac
 
-    train = csr_matrix(
-        (coo.data[~mask], (coo.row[~mask], coo.col[~mask])),
-        shape=matrix.shape,
-    )
-    test = csr_matrix(
-        (coo.data[mask], (coo.row[mask], coo.col[mask])),
-        shape=matrix.shape,
-    )
 
-    return train, test
+def sample_users(user_codes, n_users, frac, random_state=42):
+    if frac >= 1.0:
+        return np.ones(len(user_codes), dtype=bool)
+
+    rng = np.random.default_rng(random_state)
+    keep = rng.random(n_users) < frac
+    return keep[user_codes]
 
 
 def drop_negatives(matrix):
