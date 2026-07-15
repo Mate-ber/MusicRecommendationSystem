@@ -199,6 +199,75 @@ the depth curve is mildly confounded with it. And cost grows fast: a 256-factor 
 
 A 42% improvement in ndcg@10 over the 64-factor model.
 
+## What the embedding learned
+
+The ALS model is trained only on playcounts — it never sees an artist name or a genre tag. This
+section probes whether the 256-dim track factors nonetheless encode the structure a human would
+recognise, by lifting them to the artist level and testing them against genre labels the model
+never had access to.
+
+```bash
+uv run python -m src.artist_map
+```
+
+An artist's vector is the mean of their tracks' factors. Only artists with **>= 1,000
+interactions** are kept (1,385 of them), below which the averaged vector is mostly noise. Track
+factors are L2-normalised and mean-centred first, because raw ALS factors share a large common
+component (popularity) that otherwise makes everything look similar to everything.
+
+| pair | cosine | expected |
+|---|---|---|
+| Taylor Swift .. Katy Perry | +0.192 | high |
+| Taylor Swift .. Drake | +0.152 | lower |
+| Metallica .. Megadeth | +0.419 | high |
+| Taylor Swift .. Metallica | −0.038 | low |
+
+Representative nearest neighbours (whitened cosine):
+
+```
+Drake       Ginuwine (0.55), DMX (0.45), Usher (0.44), Keyshia Cole (0.44)
+Metallica   Dio (0.58), Iron Maiden (0.49), Queensryche (0.46), Black Sabbath (0.45)
+Radiohead   Eddie Vedder (0.43), Four Tet (0.42), Soda Stereo (0.41), She & Him (0.41)
+```
+
+### Does it recover genre?
+
+Genre agreement@10 is the share of an artist's 10 nearest neighbours that carry the same genre —
+an honest test, since ALS never saw genre. The random baseline is the chance two labelled artists
+share a genre.
+
+| space | genre agreement@10 |
+|---|---|
+| random baseline | 32.3% |
+| 256-dim raw | 64.3% |
+| 50-dim whitened | 64.1% |
+| 2-d t-SNE (of whitened) | 64.6% |
+| 2-d PCA | 40.3% |
+
+**The embedding recovers genre at roughly twice chance, from playcounts alone.** Whitening does not
+raise genre agreement (64.1% vs 64.3%) — its job is fixing *local* neighbour rankings and
+anisotropy, not adding global signal. Its real payoff is the 2-d map: t-SNE run on the whitened
+space preserves as much genre structure as the full embedding (64.6%) and is far more trustworthy
+than a flat PCA projection.
+
+| projection | trustworthiness@10 |
+|---|---|
+| t-SNE (of whitened) | 0.932 |
+| PCA | 0.749 |
+
+Trustworthiness@10 asks what share of each point's 10 apparent neighbours in 2-d are genuine
+neighbours in the source space (1.0 = all real, 0.5 = chance); it guards against reading clusters
+off a plot that are projection artifacts. The run writes an interactive map to
+`data/plots/artist_map.html`, coloured by genre and sized by interaction count.
+
+**Caveats.** Genre agreement is capped by label noise, not just model quality — 34% of artists have
+no trustworthy label and are excluded. A few neighbours are genuinely wrong at real cosines
+(Ennio Morricone ranks high for Metallica; Daft Punk's top neighbour is Rammstein), which whitening
+did not remove. And ALS models *co-listening*, not genre: Johnny Cash's neighbours are Genesis, Led
+Zeppelin and Bob Dylan — a plausible classic-rock back-catalogue listening segment that genre
+labels will always score as a miss. Genre agreement is a proxy for structure, not the target the
+model was trained on.
+
 ## Running
 
 ```bash
@@ -207,6 +276,7 @@ uv sync
 uv run python -m src.data.explore
 uv run python -m src.main
 uv run python -m src.depth_sweep
+uv run python -m src.artist_map
 ```
 
 Or with Docker. `data/` is not baked into the image (see `.dockerignore`), so it is mounted at
@@ -218,4 +288,5 @@ docker build -t music-rec .
 docker run --rm -v "$PWD/data:/app/data" music-rec
 docker run --rm -v "$PWD/data:/app/data" music-rec python -m src.depth_sweep
 docker run --rm -v "$PWD/data:/app/data" music-rec python -m src.data.explore
+docker run --rm -v "$PWD/data:/app/data" music-rec python -m src.artist_map
 ```
